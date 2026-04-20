@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WhatsApp + Claude</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, sans-serif; background: #f0f2f5; min-height: 100vh; }
+
+    header {
+      background: #075e54;
+      color: white;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 { font-size: 20px; font-weight: 600; }
+    header span { font-size: 13px; opacity: 0.8; }
+
+    .container { max-width: 700px; margin: 24px auto; padding: 0 16px; }
+
+    .empty {
+      text-align: center;
+      padding: 60px 20px;
+      color: #8696a0;
+      font-size: 15px;
+    }
+    .empty svg { margin-bottom: 16px; opacity: 0.4; }
+
+    .card {
+      background: white;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .contact { font-weight: 600; font-size: 15px; color: #111b21; }
+    .time { font-size: 12px; color: #8696a0; }
+
+    .label { font-size: 11px; font-weight: 600; text-transform: uppercase; color: #8696a0; margin-bottom: 6px; }
+
+    .message-box {
+      background: #f0f2f5;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 14px;
+      color: #111b21;
+      margin-bottom: 16px;
+      white-space: pre-wrap;
+    }
+
+    textarea {
+      width: 100%;
+      border: 1.5px solid #e9edef;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 14px;
+      font-family: inherit;
+      resize: vertical;
+      min-height: 80px;
+      color: #111b21;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    textarea:focus { border-color: #075e54; }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    button {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    button:hover { opacity: 0.85; }
+
+    .btn-approve { background: #075e54; color: white; flex: 1; }
+    .btn-reject { background: #f0f2f5; color: #8696a0; }
+
+    .badge {
+      background: #25d366;
+      color: white;
+      border-radius: 12px;
+      padding: 2px 10px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>WhatsApp + Claude</h1>
+      <span>Mensagens aguardando aprovação</span>
+    </div>
+    <span class="badge" id="count">0</span>
+  </header>
+
+  <div class="container" id="list"></div>
+
+  <script>
+    async function load() {
+      const res = await fetch('/api/pending');
+      const items = await res.json();
+      const list = document.getElementById('list');
+      const count = document.getElementById('count');
+      count.textContent = items.length;
+
+      if (items.length === 0) {
+        list.innerHTML = `
+          <div class="empty">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <p>Nenhuma mensagem pendente</p>
+          </div>`;
+        return;
+      }
+
+      list.innerHTML = items.map(item => `
+        <div class="card" id="card-${item.id}">
+          <div class="card-header">
+            <span class="contact">💬 ${item.name}</span>
+            <span class="time">${new Date(item.timestamp).toLocaleTimeString('pt-BR')}</span>
+          </div>
+          <div class="label">Mensagem recebida</div>
+          <div class="message-box">${item.messages.map((m, i) => item.messages.length > 1 ? `<b>${i+1}.</b> ${m}` : m).join('<br>')}</div>
+          <div class="label">Rascunho do Claude</div>
+          <textarea id="draft-${item.id}">${item.draft}</textarea>
+          <div class="actions">
+            <button class="btn-approve" onclick="approve(${item.id})">✅ Aprovar e Enviar</button>
+            <button class="btn-reject" onclick="reject(${item.id})">🗑️ Rejeitar</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function approve(id) {
+      const text = document.getElementById(`draft-${id}`).value;
+      await fetch(`/api/approve/${id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      });
+      document.getElementById(`card-${id}`).remove();
+      load();
+    }
+
+    async function reject(id) {
+      await fetch(`/api/reject/${id}`, { method: 'DELETE' });
+      document.getElementById(`card-${id}`).remove();
+      load();
+    }
+
+    load();
+    setInterval(load, 5000);
+  </script>
+</body>
+</html>
