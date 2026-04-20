@@ -139,7 +139,7 @@ Responda sempre em português. Seja conciso.`,
     if (!pending.has(item.id)) return;
     pending.delete(item.id);
     contactPending.delete(from);
-    await whatsapp.sendMessage(from, 'Oi, eu sou a IA do Will! Ele está ocupado e logo te responde. Enquanto isso, eu vou salvando o mundo! 🤖');
+    await whatsapp.sendMessage(from, 'Oi, eu sou a IA do Will! Ele está ocupado e logo te responde. Enquanto isso, ele está salvando o mundo! 🤖');
     console.log(`⏱️ Auto-resposta enviada para ${name}`);
   }, 2 * 60 * 1000);
 
