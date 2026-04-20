@@ -92,20 +92,22 @@ whatsapp.on('message', async (msg) => {
 
   console.log(`\n📩 Mensagem de ${name}: ${body}`);
 
-  // Se já existe item pendente desse contato, agrupa
+  // Agrupa ou cria item — SÍNCRONO antes de qualquer await
   const existing = contactPending.get(from);
   let item;
   if (existing) {
     item = pending.get(existing.id);
     item.messages.push(body);
-    clearTimeout(existing.timerId);
+    if (existing.timerId) clearTimeout(existing.timerId);
+    contactPending.set(from, { id: existing.id, timerId: null });
   } else {
     const id = ++pendingCounter;
     item = { id, name, from, messages: [body], draft: '', timestamp: new Date() };
     pending.set(id, item);
+    contactPending.set(from, { id, timerId: null }); // reserva antes do await
   }
 
-  // Gera rascunho com Claude considerando todas as mensagens
+  // Gera rascunho com Claude
   try {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
@@ -125,17 +127,27 @@ Responda sempre em português. Seja conciso.`,
     console.error('Erro ao chamar Claude:', err.message);
   }
 
+  // Se já foi cancelado enquanto aguardava Claude, ignora
+  if (!pending.has(item.id)) return;
+
+  // Cancela timer anterior (outra mensagem pode ter setado um entre o await)
+  const curr = contactPending.get(from);
+  if (curr && curr.timerId) clearTimeout(curr.timerId);
+
   // (Re)inicia timer de auto-resposta de 2 minutos
   const timerId = setTimeout(async () => {
     if (!pending.has(item.id)) return;
-    // Remove antes de enviar para evitar falso "manual detection"
     pending.delete(item.id);
     contactPending.delete(from);
     await whatsapp.sendMessage(from, 'Oi, eu sou a IA do Will! Ele está ocupado e logo te responde. Enquanto isso, eu vou dominando o mundo! 🤖');
     console.log(`⏱️ Auto-resposta enviada para ${name}`);
   }, 2 * 60 * 1000);
 
-  contactPending.set(from, { id: item.id, timerId });
+  if (contactPending.has(from) && contactPending.get(from).id === item.id) {
+    contactPending.set(from, { id: item.id, timerId });
+  } else {
+    clearTimeout(timerId);
+  }
 
   console.log(`💬 Rascunho gerado. Acesse http://localhost:3000 para aprovar.`);
 });
