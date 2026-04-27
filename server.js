@@ -4,12 +4,45 @@ const qrcode = require('qrcode-terminal');
 const Anthropic = require('@anthropic-ai/sdk');
 const express = require('express');
 const path = require('path');
+const Database = require('better-sqlite3');
 
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// Banco de dados
+const db = new Database(path.join(__dirname, 'conversations.db'));
+db.exec(`
+  CREATE TABLE IF NOT EXISTS messages (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_num  TEXT NOT NULL,
+    name      TEXT NOT NULL,
+    role      TEXT NOT NULL CHECK(role IN ('user','assistant')),
+    content   TEXT NOT NULL,
+    created_at DATETIME DEFAULT (datetime('now','localtime'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(from_num, created_at);
+`);
+
+const MAX_HISTORY_PAIRS = 6;
+
+function loadHistory(from) {
+  const rows = db.prepare(`
+    SELECT role, content FROM messages
+    WHERE from_num = ?
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).all(from, MAX_HISTORY_PAIRS * 2);
+  return rows.reverse(); // cronológico
+}
+
+function saveMessage(from, name, role, content) {
+  db.prepare(`
+    INSERT INTO messages (from_num, name, role, content) VALUES (?, ?, ?, ?)
+  `).run(from, name, role, content);
+}
 
 // Fila de mensagens pendentes de aprovação
 const pending = new Map();       // id → item
@@ -39,7 +72,6 @@ whatsapp.on('ready', () => {
   console.log('✅ WhatsApp conectado!');
   console.log('🌐 Acesse: http://localhost:3000\n');
 
-  // Detecta quando o usuário abre a conversa (unreadCount vai a 0)
   setInterval(async () => {
     for (const [from, { id, timerId }] of contactPending.entries()) {
       try {
@@ -58,14 +90,11 @@ whatsapp.on('ready', () => {
 whatsapp.on('disconnected', async (reason) => {
   console.log(`⚠️ WhatsApp desconectado: ${reason}. Reconectando em 5s...`);
   setTimeout(async () => {
-    try {
-      await whatsapp.destroy();
-    } catch (_) {}
+    try { await whatsapp.destroy(); } catch (_) {}
     whatsapp.initialize();
   }, 5000);
 });
 
-// Detecta quando o usuário responde manualmente pelo celular
 whatsapp.on('message_create', async (msg) => {
   if (!msg.fromMe) return;
   if (msg.to === 'status@broadcast') return;
@@ -78,7 +107,6 @@ whatsapp.on('message_create', async (msg) => {
   }
 });
 
-// Recebe mensagens
 whatsapp.on('message', async (msg) => {
   if (msg.from === 'status@broadcast') return;
   if (msg.from.endsWith('@g.us')) return;
@@ -92,7 +120,6 @@ whatsapp.on('message', async (msg) => {
 
   console.log(`\n📩 Mensagem de ${name}: ${body}`);
 
-  // Agrupa ou cria item — SÍNCRONO antes de qualquer await
   const existing = contactPending.get(from);
   let item;
   if (existing) {
@@ -104,22 +131,26 @@ whatsapp.on('message', async (msg) => {
     const id = ++pendingCounter;
     item = { id, name, from, messages: [body], draft: '', timestamp: new Date() };
     pending.set(id, item);
-    contactPending.set(from, { id, timerId: null }); // reserva antes do await
+    contactPending.set(from, { id, timerId: null });
   }
 
-  // Gera rascunho com Claude
+  // Gera rascunho com Claude usando histórico do banco
   try {
+    const history = loadHistory(from);
+    const currentContent = item.messages.length === 1
+      ? item.messages[0]
+      : item.messages.map((m, i) => `${i + 1}. "${m}"`).join('\n');
+
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 500,
       system: `Você é um assistente que ajuda William de Jesus a responder mensagens do WhatsApp.
 Escreva respostas naturais, no estilo brasileiro, diretas e amigáveis.
-Responda sempre em português. Seja conciso.`,
+Responda sempre em português. Seja conciso.
+Use o histórico da conversa para dar respostas contextualizadas.`,
       messages: [
-        {
-          role: 'user',
-          content: `Mensagens recebidas de ${name}:\n${item.messages.map((m, i) => `${i + 1}. "${m}"`).join('\n')}\n\nEscreva uma resposta adequada considerando todas as mensagens.`
-        }
+        ...history,
+        { role: 'user', content: currentContent }
       ]
     });
     item.draft = response.content[0].text;
@@ -127,14 +158,11 @@ Responda sempre em português. Seja conciso.`,
     console.error('Erro ao chamar Claude:', err.message);
   }
 
-  // Se já foi cancelado enquanto aguardava Claude, ignora
   if (!pending.has(item.id)) return;
 
-  // Cancela timer anterior (outra mensagem pode ter setado um entre o await)
   const curr = contactPending.get(from);
   if (curr && curr.timerId) clearTimeout(curr.timerId);
 
-  // (Re)inicia timer de auto-resposta de 2 minutos
   const timerId = setTimeout(async () => {
     if (!pending.has(item.id)) return;
     pending.delete(item.id);
@@ -157,6 +185,27 @@ app.get('/api/pending', (req, res) => {
   res.json(Array.from(pending.values()).reverse());
 });
 
+// API: histórico de um contato
+app.get('/api/history/:from', (req, res) => {
+  const rows = db.prepare(`
+    SELECT role, content, created_at FROM messages
+    WHERE from_num = ?
+    ORDER BY created_at ASC
+  `).all(req.params.from);
+  res.json(rows);
+});
+
+// API: lista de contatos com histórico
+app.get('/api/contacts', (req, res) => {
+  const rows = db.prepare(`
+    SELECT from_num, name, COUNT(*) as total, MAX(created_at) as last_message
+    FROM messages
+    GROUP BY from_num
+    ORDER BY last_message DESC
+  `).all();
+  res.json(rows);
+});
+
 // API: aprovar e enviar
 app.post('/api/approve/:id', async (req, res) => {
   const id = parseInt(req.params.id);
@@ -166,6 +215,14 @@ app.post('/api/approve/:id', async (req, res) => {
   const text = req.body.text || item.draft;
   try {
     await whatsapp.sendMessage(item.from, text);
+
+    // Salva a troca no banco
+    const userContent = item.messages.length === 1
+      ? item.messages[0]
+      : item.messages.map((m, i) => `${i + 1}. "${m}"`).join('\n');
+    saveMessage(item.from, item.name, 'user', userContent);
+    saveMessage(item.from, item.name, 'assistant', text);
+
     pending.delete(id);
     contactPending.delete(item.from);
     console.log(`✅ Mensagem enviada para ${item.name}`);
